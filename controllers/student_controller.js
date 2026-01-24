@@ -1,65 +1,226 @@
-const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
+const asyncHandler = require("../middleware/async");
+const Student = require("../models/student_model");
+const path = require("path");
+const fs = require("fs");
 
-const studentSchema = new mongoose.Schema({
-  fullname: {
-    type: String,
-    required: true,
-    trim: true,
-  },
-  email: {
-    type: String,
-    required: [true, "Please add an email"],
-    unique: true,
-    trim: true,
-    lowercase: true,
-    match: [
-      /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/,
-      "Please add a valid email",
-    ],
-  },
-  password: {
-    type: String,
-    required: [true, "Please add a password"],
-    minlength: 6,
-    select: false, // Don't include password in queries by default
-  },
-  phoneNumber: {
-    type: String,
-    required: true,
-    trim: true,
-  },
-  profilePicture: {
-    type: String,
-    default: "default-profile.png",
-    trim: true,
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
-});
+// @desc    Create a new student
+// @route   POST /api/students
+// @access  Public
 
-// Encrypt password using bcrypt before saving
-studentSchema.pre("save", async function (next) {
-  if (!this.isModified("password")) {
-    next();
+exports.createStudent = asyncHandler(async (req, res) => {
+  const { fullname, email, password, phoneNumber, profilePicture } = req.body;
+
+  console.log("Creating student with name:", fullname);
+
+  // Check if the email already exists
+  const existingEmail = await Student.findOne({ email });
+  if (existingEmail) {
+    return res.status(400).json({ message: "Email already exists" });
   }
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
+
+  // Create the student
+  const student = await Student.create({
+    fullname,
+    email,
+    password, // Password will be hashed automatically by the pre-save hook
+    phoneNumber,
+    profilePicture: profilePicture || "default-profile.png",
+  });
+
+  // Remove password from response
+  const studentResponse = student.toObject();
+  delete studentResponse.password;
+
+  res.status(201).json({
+    success: true,
+    data: studentResponse,
+  });
 });
 
-// Sign JWT and return
-studentSchema.methods.getSignedJwtToken = function () {
-  return jwt.sign({ id: this._id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRE,
+// @desc    Login student
+// @route   POST /api/students/login
+// @access  Public
+
+exports.loginStudent = asyncHandler(async (req, res, next) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res
+      .status(400)
+      .json({ message: "Please provide an email and password" });
+  }
+
+  // Check if student exists
+  const student = await Student.findOne({ email }).select("+password");
+
+  if (!student || !(await student.matchPassword(password))) {
+    return res.status(401).json({ message: "Invalid credentials" });
+  }
+
+  sendTokenResponse(student, 200, res);
+});
+
+// @desc    Get all students
+// @route   GET /api/students
+// @access  Public
+
+exports.getAllStudents = asyncHandler(async (req, res) => {
+  const students = await Student.find();
+
+  res.status(200).json({
+    success: true,
+    count: students.length,
+    data: students,
   });
-};
+});
 
-// Match user entered password to hashed password in database
-studentSchema.methods.matchPassword = async function (enteredPassword) {
-  return await bcrypt.compare(enteredPassword, this.password);
-};
+// @desc    Get a student by ID
+// @route   GET /api/students/:id
+// @access  Public
 
-module.exports = mongoose.model("Student", studentSchema);
+exports.getStudentById = asyncHandler(async (req, res) => {
+  const student = await Student.findById(req.params.id);
+
+  if (!student) {
+    return res.status(404).json({ message: "Student not found" });
+  }
+
+  res.status(200).json({
+    success: true,
+    data: student,
+  });
+});
+
+// @desc    Update a student
+// @route   PUT /api/students/:id
+// @access  Private
+
+exports.updateStudent = asyncHandler(async (req, res) => {
+  const { fullname, email, password, phoneNumber, profilePicture } = req.body;
+
+  const student = await Student.findById(req.params.id);
+
+  if (!student) {
+    return res.status(404).json({ message: "Student not found" });
+  }
+
+  // Authorization check: Make sure user is updating their own profile
+  if (student._id.toString() !== req.user._id.toString()) {
+    return res.status(403).json({
+      message: "Not authorized to update this student profile"
+    });
+  }
+
+  // Update the student fields
+  student.fullname = fullname || student.fullname;
+  student.email = email || student.email;
+  student.phoneNumber = phoneNumber || student.phoneNumber;
+  student.profilePicture = profilePicture || student.profilePicture;
+
+  // Only update password if provided (will be hashed by pre-save hook)
+  if (password) {
+    student.password = password;
+  }
+
+  await student.save();
+
+  res.status(200).json({
+    success: true,
+    data: student,
+  });
+});
+
+// @desc    Delete a student
+// @route   DELETE /api/students/:id
+// @access  Private
+
+exports.deleteStudent = asyncHandler(async (req, res) => {
+  const student = await Student.findById(req.params.id);
+
+  if (!student) {
+    return res.status(404).json({ message: "Student not found" });
+  }
+
+  // Authorization check: Make sure user is deleting their own profile
+  if (student._id.toString() !== req.user._id.toString()) {
+    return res.status(403).json({
+      message: "Not authorized to delete this student profile"
+    });
+  }
+
+  // Remove the student's profile picture if it exists
+  if (
+    student.profilePicture &&
+    student.profilePicture !== "default-profile.png"
+  ) {
+    const profilePicturePath = path.join(
+      __dirname,
+      "../public/profile_pictures",
+      student.profilePicture
+    );
+    if (fs.existsSync(profilePicturePath)) {
+      fs.unlinkSync(profilePicturePath);
+    }
+  }
+
+  await Student.findByIdAndDelete(req.params.id);
+
+  res.status(200).json({
+    success: true,
+    message: "Student deleted successfully",
+  });
+});
+
+// @desc Upload Single Image
+// @route POST /api/v1/auth/upload
+// @access Private
+
+exports.uploadProfilePicture = asyncHandler(async (req, res, next) => {
+  if (!req.file) {
+    return res.status(400).send({ message: "Please upload a file" });
+  }
+
+  // Check for the file size and send an error message
+  if (req.file.size > process.env.MAX_FILE_UPLOAD) {
+    return res.status(400).send({
+      message: `Please upload an image less than ${process.env.MAX_FILE_UPLOAD} bytes`,
+    });
+  }
+
+  res.status(200).json({
+    success: true,
+    data: req.file.filename,
+  });
+});
+
+// Get token from model , create cookie and send response
+const sendTokenResponse = (student, statusCode, res) => {
+  const token = student.getSignedJwtToken();
+
+  const options = {
+    //Cookie will expire in 30 days
+    expires: new Date(
+      Date.now() + process.env.JWT_COOKIE_EXPIRE * 24 * 60 * 60 * 1000
+    ),
+    httpOnly: true,
+  };
+
+  // Cookie security is false .if you want https then use this code. do not use in development time
+  if (process.env.NODE_ENV === "production") {
+    options.secure = true;
+  }
+  //we have created a cookie with a token
+
+  // Remove password from user object
+  const userResponse = student.toObject();
+  delete userResponse.password;
+
+  res
+    .status(statusCode)
+    .cookie("token", token, options) // key , value ,options
+    .json({
+      success: true,
+      token,
+      data: userResponse,
+    });
+};
