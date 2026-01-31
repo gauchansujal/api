@@ -118,8 +118,8 @@ const studentRoutes = require("./routes/student_routes");
 app.use("/api/v1/students/login", authLimiter);
 app.use("/api/v1/students", studentRoutes);
 
-// const itemRoutes = require("./routes/item_route");
-// app.use("/api/v1/items", itemRoutes);
+const itemRoutes = require("./routes/item_route");
+app.use("/api/v1/items", itemRoutes);
 
 // const commentRoutes = require("./routes/comment_route");
 // app.use("/api/v1/comments", commentRoutes);
